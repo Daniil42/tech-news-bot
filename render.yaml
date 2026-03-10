@@ -1,0 +1,13 @@
+services:
+  - type: worker
+    name: tech-news-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python parser.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHANNEL_ID
+        sync: false
+      - key: PARSER_INTERVAL
+        value: 30

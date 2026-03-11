@@ -1,6 +1,7 @@
 """
-Tech News Parser
+Tech News Parser v2.0
 Парсер новостей о технологиях: ИИ, мобильные устройства, гаджеты, техно-мероприятия
+Скрыпинг статей + AI-суммаризация через Gemini
 """
 
 import logging
@@ -24,49 +25,7 @@ load_dotenv(dotenv_path=env_path, override=True)
 # Токены берём из переменных окружения
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")
-TRANSLATE_ENABLED = True  # Включить перевод на русский
-
-
-def translate_to_russian(text: str) -> str:
-    """
-    Перевод текста на русский через MyMemory API (бесплатно, без ключа).
-    Лимит: 1000 слов/день бесплатно.
-    """
-    if not TRANSLATE_ENABLED:
-        return text
-    
-    # Пропускаем очень короткие тексты
-    if len(text.strip()) < 10:
-        return text
-    
-    try:
-        # MyMemory Translation API (бесплатный, без ключа)
-        url = "https://api.mymemory.translated.net/get"
-        params = {
-            "q": text,
-            "langpair": "en|ru"
-        }
-        
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        
-        result = response.json()
-        
-        if "responseData" in result and "translatedText" in result["responseData"]:
-            translated = result["responseData"]["translatedText"]
-            
-            # Проверяем качество перевода (иногда API возвращает пустоту)
-            if translated and len(translated) > 5:
-                logger.info(f"✓ Переведено (MyMemory): {text[:40]}... → {translated[:40]}...")
-                return translated
-        
-        # Если перевод не удался, возвращаем оригинал
-        logger.info(f"⚠ Перевод не удался, используем оригинал: {text[:40]}")
-        return text
-        
-    except Exception as e:
-        logger.warning(f"⚠ Ошибка перевода: {e}. Используем оригинал.")
-        return text
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # Для AI-суммаризации
 
 # Настройка логирования
 logging.basicConfig(
@@ -77,14 +36,174 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 PARSER_INTERVAL = int(os.getenv("PARSER_INTERVAL", "30"))  # минут
+POST_INTERVAL = 60  # 1 пост в час
+
+
+def fetch_article_content(url: str) -> str:
+    """
+    Скрыпинг полной статьи через Jina AI Reader (бесплатно).
+    Jina Reader извлекает чистый текст статьи без рекламы.
+    """
+    try:
+        jina_url = f"https://r.jina.ai/{url}"
+        headers = {
+            "Accept": "text/plain"
+        }
+        
+        response = requests.get(jina_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        content = response.text
+        
+        # Проверяем, что получили реальный контент
+        if len(content) < 200:
+            logger.warning(f"Слишком короткий контент: {len(content)} символов")
+            return ""
+        
+        # Ограничиваем размер для Gemini
+        if len(content) > 8000:
+            content = content[:8000]
+        
+        logger.info(f"✓ Получено {len(content)} символов статьи")
+        return content
+        
+    except Exception as e:
+        logger.warning(f"⚠ Ошибка скрыпинга {url}: {e}")
+        return ""
+
+
+def summarize_with_gemini(title: str, content: str) -> str:
+    """
+    AI-суммаризация статьи через Gemini Flash (бесплатный).
+    Возвращает структурированный пост на русском языке.
+    """
+    if not GEMINI_API_KEY:
+        logger.warning("GEMINI_API_KEY не настроен, пропускаем суммаризацию")
+        return ""
+    
+    if not content or len(content) < 100:
+        return ""
+    
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        
+        prompt = f"""Ты — редактор техно-блога. Напиши пост для Telegram-канала про технологии.
+
+Заголовок новости: {title}
+
+Содержание статьи:
+{content}
+
+Требования к посту:
+1. Напиши на русском языке
+2. Структура:
+   - Краткое вступление (1-2 предложения, что произошло)
+   - Основные детали (3-4 предложения, ключевые факты)
+   - Почему это важно (1-2 предложения)
+3. Общий объём: 150-250 слов
+4. Используй эмодзи уместно (2-3 штуки)
+5. Пиши живым языком, без канцелярита
+6. НЕ добавляй хэштеги и ссылку — они будут добавлены отдельно
+
+Важно: пиши как человек, а не как робот. Читатель должен понять суть новости и почему она важна."""
+
+        data = {
+            "contents": [{
+                "parts": [{
+                    "text": prompt
+                }]
+            }],
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 1000
+            }
+        }
+        
+        response = requests.post(url, json=data, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        if "candidates" in result and len(result["candidates"]) > 0:
+            text = result["candidates"][0]["content"]["parts"][0]["text"]
+            logger.info(f"✓ AI-суммаризация выполнена: {len(text)} символов")
+            return text.strip()
+        
+        logger.warning("⚠ Пустой ответ от Gemini")
+        return ""
+        
+    except Exception as e:
+        logger.error(f"⚠ Ошибка Gemini: {e}")
+        return ""
+
+
+def format_telegram_post(news: Dict, ai_summary: str = "") -> str:
+    """Форматирование новости для Telegram"""
+    title = news["title"].strip()
+    
+    # Если есть AI-суммаризация, используем её
+    if ai_summary:
+        post = f"📰 **{title}**\n\n{ai_summary}\n\n"
+    else:
+        # Fallback на обычный summary
+        post = f"📰 **{title}**\n\n"
+        if news.get("summary"):
+            summary = news["summary"].strip()
+            if len(summary) > 400:
+                summary = summary[:397] + "..."
+            post += f"{summary}\n\n"
+    
+    post += f"📌 **Источник:** {news['source']}\n"
+    post += f"🔗 [Читать оригинал]({news['link']})\n\n"
+    
+    # Хэштеги
+    hashtags = generate_hashtags(news["title"])
+    post += hashtags
+    
+    return post
+
+
+def generate_hashtags(title: str) -> str:
+    """Генерация хэштегов на основе заголовка"""
+    hashtags = []
+    title_lower = title.lower()
+
+    if any(word in title_lower for word in ["openai", "gpt", "chatgpt", "o1", "o3"]):
+        hashtags.append("#OpenAI")
+    if any(word in title_lower for word in ["anthropic", "claude"]):
+        hashtags.append("#Claude")
+    if any(word in title_lower for word in ["google", "gemini", "deepmind"]):
+        hashtags.append("#Google")
+    if any(word in title_lower for word in ["apple", "iphone", "ipad", "mac"]):
+        hashtags.append("#Apple")
+    if any(word in title_lower for word in ["samsung", "galaxy"]):
+        hashtags.append("#Samsung")
+    if any(word in title_lower for word in ["midjourney", "stable diffusion", "dall"]):
+        hashtags.append("#GenerativeAI")
+    if any(word in title_lower for word in ["llm", "language model"]):
+        hashtags.append("#LLM")
+    if any(word in title_lower for word in ["ai", "artificial intelligence", "ии", "нейросеть"]):
+        hashtags.append("#ИИ")
+    if any(word in title_lower for word in ["vr", "ar", "vision pro", "quest", "virtual reality"]):
+        hashtags.append("#VR_AR")
+    if any(word in title_lower for word in ["robot", "robotics", "робот"]):
+        hashtags.append("#Роботы")
+    if any(word in title_lower for word in ["startup", "стартап", "funding", "investment"]):
+        hashtags.append("#Стартапы")
+
+    hashtags.append("#Технологии")
+    hashtags.append("#Новости")
+
+    return " ".join(hashtags)
+
 
 # Ключевые слова для фильтрации новостей
-# Включает: ИИ, мобильные технологии, гаджеты, техно-мероприятия
 TECH_KEYWORDS = [
     # ИИ и машинное обучение
     "artificial intelligence", "AI", "machine learning", "ML",
     "deep learning", "neural network", "GPT", "LLM",
     "ChatGPT", "Claude", "Gemini", "Midjourney", "DALL-E",
+    "OpenAI", "Anthropic", "DeepMind",
     "генеративный", "нейросеть", "ИИ", "машинное обучение",
     
     # Мобильные технологии и телефоны
@@ -106,6 +225,10 @@ TECH_KEYWORDS = [
     # Инновации и стартапы
     "startup", "innovation", "tech startup", "funding", "venture capital",
     "инновация", "стартап", "инвестиции",
+    
+    # Роботы
+    "robot", "robotics", "humanoid", "automation",
+    "робот", "робототехника",
     
     # Общие технологии
     "technology", "tech", "software", "hardware", "app",
@@ -160,11 +283,6 @@ SOURCES = {
         "url": "https://openai.com/blog/rss/",
         "type": "rss"
     },
-    "anthropic": {
-        "name": "Anthropic",
-        "url": "https://www.anthropic.com/news?format=rss",
-        "type": "rss"
-    },
     "google_ai": {
         "name": "Google AI",
         "url": "https://ai.google/rss.xml",
@@ -183,15 +301,12 @@ CATEGORY_FILE = DATA_DIR / "last_category.json"
 # Категории для чередования
 CATEGORIES = ["ai", "mobile", "gadget", "event", "other"]
 CATEGORY_KEYWORDS = {
-    "ai": ["AI", "artificial intelligence", "machine learning", "GPT", "LLM", "ChatGPT", "Claude", "Gemini", "нейросеть", "ИИ", "OpenAI", "Anthropic"],
+    "ai": ["AI", "artificial intelligence", "machine learning", "GPT", "LLM", "ChatGPT", "Claude", "Gemini", "нейросеть", "ИИ", "OpenAI", "Anthropic", "DeepMind"],
     "mobile": ["iPhone", "Android", "Samsung", "Google Pixel", "smartphone", "телефон", "смартфон", "5G", "6G", "mobile", "MWC", "Mobile World Congress"],
     "gadget": ["VR", "AR", "Vision Pro", "Quest", "smartwatch", "tablet", "laptop", "гаджет", "устройство", "wearable"],
     "event": ["CES", "WWDC", "Google I/O", "Apple Event", "Samsung Unpacked", "Microsoft Build", "конференция", "выставка"],
-    "other": []  # Все остальное
+    "other": []
 }
-
-# Интервал публикации (минуты)
-POST_INTERVAL = 60  # 1 пост в час
 
 
 def load_seen_news() -> set:
@@ -276,7 +391,7 @@ def get_next_category() -> str:
 
 
 def select_news_by_category(queue: List[Dict], preferred_category: str) -> Optional[Dict]:
-    """Выбрать новость по категории (или первую попавшуюся, если нет нужной)"""
+    """Выбрать новость по категории"""
     # Сначала ищем новость нужной категории
     for i, news in enumerate(queue):
         if news.get("category") == preferred_category:
@@ -325,7 +440,7 @@ def parse_rss_feed(source_key: str, limit: int = 10) -> List[Dict]:
             # Очищаем summary от HTML тегов
             if summary:
                 soup = BeautifulSoup(summary, "html.parser")
-                summary = soup.get_text()[:500]  # Ограничиваем длину
+                summary = soup.get_text()[:300]
 
             news_items.append({
                 "source": source["name"],
@@ -354,67 +469,6 @@ def filter_tech_news(news_items: List[Dict]) -> List[Dict]:
     return filtered
 
 
-def format_telegram_post(news: Dict, translate: bool = True) -> str:
-    """Форматирование новости для Telegram"""
-    # Очищаем заголовок
-    title = news["title"].strip()
-    
-    # Переводим заголовок на русский
-    if translate and TRANSLATE_ENABLED:
-        logger.info(f"Перевод заголовка: {title[:50]}...")
-        title = translate_to_russian(title)
-    
-    if len(title) > 100:
-        title = title[:97] + "..."
-
-    # Формируем пост
-    post = f"🔥 **{title}**\n\n"
-
-    if news["summary"]:
-        summary = news["summary"].strip()
-        # Переводим summary на русский
-        if translate and TRANSLATE_ENABLED and len(summary) > 50:
-            logger.info(f"Перевод описания...")
-            summary = translate_to_russian(summary)
-        
-        if len(summary) > 500:
-            summary = summary[:497] + "..."
-        post += f"{summary}\n\n"
-
-    post += f"📌 **Источник:** {news['source']}\n"
-    post += f"🔗 [Читать далее]({news['link']})\n\n"
-
-    # Добавляем хэштеги
-    hashtags = generate_hashtags(news["title"])
-    post += hashtags
-
-    return post
-
-
-def generate_hashtags(title: str) -> str:
-    """Генерация хэштегов на основе заголовка"""
-    hashtags = []
-    title_lower = title.lower()
-
-    if any(word in title_lower for word in ["openai", "gpt", "chatgpt"]):
-        hashtags.append("#OpenAI")
-    if any(word in title_lower for word in ["anthropic", "claude"]):
-        hashtags.append("#Claude")
-    if any(word in title_lower for word in ["google", "gemini"]):
-        hashtags.append("#Google")
-    if any(word in title_lower for word in ["midjourney", "stable diffusion", "dall"]):
-        hashtags.append("#GenerativeAI")
-    if any(word in title_lower for word in ["llm", "language model"]):
-        hashtags.append("#LLM")
-    if any(word in title_lower for word in ["ai", "artificial intelligence", "ии", "нейросеть"]):
-        hashtags.append("#ИИ")
-
-    hashtags.append("#Новости")
-    hashtags.append("#Технологии")
-
-    return " ".join(hashtags)
-
-
 async def send_to_telegram(post: str):
     """Отправка поста в Telegram"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
@@ -430,9 +484,9 @@ async def send_to_telegram(post: str):
     }
 
     try:
-        response = requests.post(url, json=data, timeout=10)
+        response = requests.post(url, json=data, timeout=15)
         response.raise_for_status()
-        logger.info("Пост отправлен в Telegram")
+        logger.info("✓ Пост отправлен в Telegram")
         return True
     except Exception as e:
         logger.error(f"Ошибка отправки в Telegram: {e}")
@@ -450,44 +504,35 @@ def save_news(news_items: List[Dict]):
     logger.info(f"Новости сохранены в {filename}")
 
 
-async def parse_and_send(sources: List[str] = None, auto_post: bool = True):
+async def parse_and_send(sources: List[str] = None):
     """Парсинг и добавление новостей в очередь"""
     if sources is None:
         sources = list(SOURCES.keys())
 
-    # Загружаем уже виденные новости
     seen_news = load_seen_news()
-
-    # Загружаем очередь
     queue = load_queue()
 
     all_news = []
     new_news = []
 
-    # Парсим каждый источник
     for source_key in sources:
         news_items = parse_rss_feed(source_key)
         all_news.extend(news_items)
 
-    # Фильтруем по технологической тематике
     tech_news = filter_tech_news(all_news)
     logger.info(f"Найдено {len(tech_news)} техно-новостей")
 
-    # Фильтруем уже виденные и добавляем категорию
     for news in tech_news:
         news_id = news["link"]
         if news_id not in seen_news:
-            # Определяем категорию
             news["category"] = detect_category(news["title"], news["summary"])
             new_news.append(news)
             seen_news.add(news_id)
 
     logger.info(f"Новых новостей: {len(new_news)}")
 
-    # Сохраняем виденные
     save_seen_news(seen_news)
 
-    # Добавляем в очередь
     if new_news:
         queue.extend(new_news)
         save_queue(queue)
@@ -498,7 +543,7 @@ async def parse_and_send(sources: List[str] = None, auto_post: bool = True):
 
 
 async def post_from_queue():
-    """Опубликовать одну новость из очереди"""
+    """Опубликовать одну новость из очереди с AI-суммаризацией"""
     queue = load_queue()
     
     if not queue:
@@ -527,36 +572,43 @@ async def post_from_queue():
         logger.info("Нет подходящих новостей")
         return False
     
-    # Публикуем
-    post = format_telegram_post(news)
+    # AI-суммаризация
+    ai_summary = ""
+    if GEMINI_API_KEY:
+        logger.info(f"🔄 Скрыпинг статьи: {news['link']}")
+        content = fetch_article_content(news["link"])
+        
+        if content:
+            logger.info("🤖 AI-суммаризация...")
+            ai_summary = summarize_with_gemini(news["title"], content)
+    
+    # Формируем и отправляем пост
+    post = format_telegram_post(news, ai_summary)
     success = await send_to_telegram(post)
     
     if success:
-        # Сохраняем время и категорию
         save_last_post_time(datetime.now())
         save_last_category(news.get("category", "other"))
-        
-        # Обновляем очередь
         save_queue(queue)
-        logger.info(f"Опубликовано: {news['title'][:50]}...")
+        logger.info(f"✅ Опубликовано: {news['title'][:50]}...")
         return True
     
     return False
 
 
 async def main():
-    """Основная функция с разделением парсинга и публикации"""
-    logger.info("🤖 Запуск Tech News Parser...")
-    logger.info(f"📅 Режим: 1 пост каждые {POST_INTERVAL} минут с чередованием категорий")
+    """Основная функция"""
+    logger.info("🤖 Запуск Tech News Parser v2.0 (AI-powered)...")
+    logger.info(f"📅 Режим: 1 пост каждые {POST_INTERVAL} минут")
+    if GEMINI_API_KEY:
+        logger.info("🧠 AI-суммаризация: ВКЛЮЧЕНА")
+    else:
+        logger.info("⚠️ AI-суммаризация: ОТКЛЮЧЕНА (добавь GEMINI_API_KEY)")
 
     while True:
         try:
-            # Парсим новости и пополняем очередь
             await parse_and_send()
-            
-            # Публикуем одну новость из очереди (если прошло время)
             await post_from_queue()
-            
         except Exception as e:
             logger.error(f"Ошибка в цикле: {e}")
 

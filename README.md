@@ -1,10 +1,10 @@
-# 🤖 Tech News Bot v2.1
+# 🤖 Tech News Bot v2.0
 
 Автоматический парсер техно-новостей для Telegram канала с AI-суммаризацией.
 
-## ✨ Новое в v2.1
+## ✨ Новое в v2.0
 
-- 🧠 **AI-суммаризация** через Groq Llama 3.1 (бесплатно, очень быстро!)
+- 🧠 **AI-суммаризация** через Gemini Flash (бесплатно)
 - 📰 **Скрыпинг полных статей** через Jina AI Reader (бесплатно)
 - 📝 Развёрнутые посты 150-250 слов вместо 1-2 предложений
 - 🇷🇺 Посты на русском языке
@@ -37,18 +37,17 @@ cd tech-news-bot
 ```
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHANNEL_ID=your_channel_id
-GROQ_API_KEY=your_groq_api_key
+GEMINI_API_KEY=your_gemini_api_key
 PARSER_INTERVAL=30
 ```
 
-### 4. Получить Groq API Key (бесплатно!)
+### 4. Получить Gemini API Key (бесплатно!)
 
-1. Зайди на [console.groq.com/keys](https://console.groq.com/keys)
-2. Зарегистрируйся (бесплатно)
-3. Создай API Key
-4. Добавь в Railway как `GROQ_API_KEY`
+1. Зайди на [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+2. Создай API Key
+3. Добавь в Railway как `GEMINI_API_KEY`
 
-**Groq бесплатный** — щедрые лимиты, очень быстрый!
+**Gemini Flash бесплатный** — 1500 запросов/день.
 
 ### 5. Деплой
 
@@ -62,7 +61,7 @@ pip install -r requirements.txt
 # Создать .env файл
 echo "TELEGRAM_BOT_TOKEN=your_token" > .env
 echo "TELEGRAM_CHANNEL_ID=your_channel" >> .env
-echo "GROQ_API_KEY=your_groq_key" >> .env
+echo "GEMINI_API_KEY=your_gemini_key" >> .env
 echo "PARSER_INTERVAL=30" >> .env
 
 python parser.py
@@ -85,8 +84,8 @@ python parser.py
 
 1. Бот находит новость по ключевым словам
 2. Скрыпит полную статью через Jina AI Reader
-3. Отправляет текст в Groq (Llama 3.1 70B)
-4. Groq пишет структурированный пост на русском:
+3. Отправляет текст в Gemini Flash
+4. Gemini пишет структурированный пост на русском:
    - Что произошло
    - Основные детали
    - Почему это важно

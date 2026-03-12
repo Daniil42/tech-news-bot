@@ -138,25 +138,32 @@ def summarize_with_gemini(title: str, content: str) -> str:
 
 
 def format_telegram_post(news: Dict, ai_summary: str = "") -> str:
-    """Форматирование новости для Telegram"""
+    """Форматирование новости для Telegram (используем HTML вместо Markdown)"""
     title = news["title"].strip()
+    
+    # Экранируем HTML символы в заголовке
+    title_escaped = title.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     
     # Если есть AI-суммаризация, используем её
     if ai_summary:
-        post = f"📰 **{title}**\n\n{ai_summary}\n\n"
+        # Экранируем AI summary тоже
+        summary_escaped = ai_summary.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        post = f"📰 <b>{title_escaped}</b>\n\n{summary_escaped}\n\n"
     else:
         # Fallback на обычный summary
-        post = f"📰 **{title}**\n\n"
+        post = f"📰 <b>{title_escaped}</b>\n\n"
         if news.get("summary"):
             summary = news["summary"].strip()
             if len(summary) > 400:
                 summary = summary[:397] + "..."
-            post += f"{summary}\n\n"
+            summary_escaped = summary.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            post += f"{summary_escaped}\n\n"
     
-    post += f"📌 **Источник:** {news['source']}\n"
-    post += f"🔗 [Читать оригинал]({news['link']})\n\n"
+    source_escaped = news['source'].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    post += f"📌 <b>Источник:</b> {source_escaped}\n"
+    post += f"🔗 <a href=\"{news['link']}\">Читать оригинал</a>\n\n"
     
-    # Хэштеги
+    # Хэштеги (не экранируем, это простые строки)
     hashtags = generate_hashtags(news["title"])
     post += hashtags
     
@@ -469,6 +476,15 @@ def filter_tech_news(news_items: List[Dict]) -> List[Dict]:
     return filtered
 
 
+def escape_markdown(text: str) -> str:
+    """Экранирование спецсимволов Markdown для Telegram"""
+    # Символы которые нужно экранировать в Markdown v1
+    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+
 async def send_to_telegram(post: str):
     """Отправка поста в Telegram"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
@@ -476,18 +492,29 @@ async def send_to_telegram(post: str):
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    
+    # Проверяем длину поста (лимит Telegram 4096 символов)
+    if len(post) > 4096:
+        logger.warning(f"Пост слишком длинный: {len(post)} символов, обрезаем до 4096")
+        post = post[:4093] + "..."
+    
     data = {
         "chat_id": TELEGRAM_CHANNEL_ID,
         "text": post,
-        "parse_mode": "Markdown",
+        "parse_mode": "HTML",
         "disable_web_page_preview": False
     }
 
     try:
         response = requests.post(url, json=data, timeout=15)
         response.raise_for_status()
-        logger.info("✓ Пост отправлен в Telegram")
+        result = response.json()
+        logger.info(f"✓ Пост отправлен в Telegram: {result.get('result', {}).get('message_id', 'N/A')}")
         return True
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"Ошибка Telegram API: {e}")
+        logger.error(f"Текст ошибки: {e.response.text if e.response else 'N/A'}")
+        return False
     except Exception as e:
         logger.error(f"Ошибка отправки в Telegram: {e}")
         return False

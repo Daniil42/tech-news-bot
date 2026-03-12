@@ -1,7 +1,7 @@
 """
-Tech News Parser v2.0
+Tech News Parser v2.1
 Парсер новостей о технологиях: ИИ, мобильные устройства, гаджеты, техно-мероприятия
-Скрыпинг статей + AI-суммаризация через Gemini
+Скрыпинг статей + AI-суммаризация через Groq (Llama 3.1)
 """
 
 import logging
@@ -25,7 +25,7 @@ load_dotenv(dotenv_path=env_path, override=True)
 # Токены берём из переменных окружения
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # Для AI-суммаризации
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")  # Для AI-суммаризации
 
 # Настройка логирования
 logging.basicConfig(
@@ -72,20 +72,25 @@ def fetch_article_content(url: str) -> str:
         return ""
 
 
-def summarize_with_gemini(title: str, content: str) -> str:
+def summarize_with_groq(title: str, content: str) -> str:
     """
-    AI-суммаризация статьи через Gemini Flash (бесплатный).
+    AI-суммаризация статьи через Groq API (Llama 3.1, бесплатно).
     Возвращает структурированный пост на русском языке.
     """
-    if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY не настроен, пропускаем суммаризацию")
+    if not GROQ_API_KEY:
+        logger.warning("GROQ_API_KEY не настроен, пропускаем суммаризацию")
         return ""
     
     if not content or len(content) < 100:
         return ""
     
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
         
         prompt = f"""Ты — редактор техно-блога. Напиши пост для Telegram-канала про технологии.
 
@@ -108,32 +113,36 @@ def summarize_with_gemini(title: str, content: str) -> str:
 Важно: пиши как человек, а не как робот. Читатель должен понять суть новости и почему она важна."""
 
         data = {
-            "contents": [{
-                "parts": [{
-                    "text": prompt
-                }]
-            }],
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 1000
-            }
+            "model": "llama-3.1-70b-versatile",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Ты — редактор техно-блога. Пишешь увлекательные посты для Telegram."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.7,
+            "max_tokens": 1000
         }
         
-        response = requests.post(url, json=data, timeout=30)
+        response = requests.post(url, headers=headers, json=data, timeout=30)
         response.raise_for_status()
         
         result = response.json()
         
-        if "candidates" in result and len(result["candidates"]) > 0:
-            text = result["candidates"][0]["content"]["parts"][0]["text"]
+        if "choices" in result and len(result["choices"]) > 0:
+            text = result["choices"][0]["message"]["content"]
             logger.info(f"✓ AI-суммаризация выполнена: {len(text)} символов")
             return text.strip()
         
-        logger.warning("⚠ Пустой ответ от Gemini")
+        logger.warning("⚠ Пустой ответ от Groq")
         return ""
         
     except Exception as e:
-        logger.error(f"⚠ Ошибка Gemini: {e}")
+        logger.error(f"⚠ Ошибка Groq: {e}")
         return ""
 
 
@@ -574,13 +583,13 @@ async def post_from_queue():
     
     # AI-суммаризация
     ai_summary = ""
-    if GEMINI_API_KEY:
+    if GROQ_API_KEY:
         logger.info(f"🔄 Скрыпинг статьи: {news['link']}")
         content = fetch_article_content(news["link"])
         
         if content:
             logger.info("🤖 AI-суммаризация...")
-            ai_summary = summarize_with_gemini(news["title"], content)
+            ai_summary = summarize_with_groq(news["title"], content)
     
     # Формируем и отправляем пост
     post = format_telegram_post(news, ai_summary)
@@ -598,12 +607,12 @@ async def post_from_queue():
 
 async def main():
     """Основная функция"""
-    logger.info("🤖 Запуск Tech News Parser v2.0 (AI-powered)...")
+    logger.info("🤖 Запуск Tech News Parser v2.1 (Groq AI-powered)...")
     logger.info(f"📅 Режим: 1 пост каждые {POST_INTERVAL} минут")
-    if GEMINI_API_KEY:
-        logger.info("🧠 AI-суммаризация: ВКЛЮЧЕНА")
+    if GROQ_API_KEY:
+        logger.info("🧠 AI-суммаризация: ВКЛЮЧЕНА (Groq Llama 3.1)")
     else:
-        logger.info("⚠️ AI-суммаризация: ОТКЛЮЧЕНА (добавь GEMINI_API_KEY)")
+        logger.info("⚠️ AI-суммаризация: ОТКЛЮЧЕНА (добавь GROQ_API_KEY)")
 
     while True:
         try:

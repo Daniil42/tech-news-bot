@@ -1,14 +1,15 @@
 """
-Tech News Parser v2.3
+Tech News Parser v2.4
 Парсер новостей о технологиях: ИИ, мобильные устройства, гаджеты, техно-мероприятия
 Скрыпинг статей + AI-суммаризация через Gemini
-v2.3: Авто-очистка старых новостей (48ч) для предотвращения дубликатов
+v2.4: Fallback перевод при rate limit + retry логика
 """
 
 import logging
 import os
 import json
 import asyncio
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -73,10 +74,60 @@ def fetch_article_content(url: str) -> str:
         return ""
 
 
-def summarize_with_gemini(title: str, content: str) -> str:
+def translate_fallback(title: str) -> str:
+    """
+    Fallback: простой перевод заголовка на русский через Gemini.
+    Используется когда основная суммаризация недоступна.
+    """
+    if not GEMINI_API_KEY or not title:
+        return ""
+    
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        
+        prompt = f"""Переведи этот заголовок техно-новости на русский язык. 
+Только перевод, без комментариев.
+
+Заголовок: {title}
+
+Перевод:"""
+
+        data = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 200
+            }
+        }
+        
+        response = requests.post(url, json=data, timeout=15)
+        
+        if response.status_code == 429:
+            logger.warning("⚠ Gemini rate limit в fallback переводе")
+            return ""
+        
+        response.raise_for_status()
+        result = response.json()
+        
+        if "candidates" in result and len(result["candidates"]) > 0:
+            translation = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+            logger.info(f"✓ Fallback перевод выполнен: {translation[:50]}...")
+            return f"📰 {translation}\n\n_Оригинальная статья на английском. Полная версия по ссылке ниже._"
+        
+        return ""
+        
+    except Exception as e:
+        logger.error(f"⚠ Ошибка fallback перевода: {e}")
+        return ""
+
+
+def summarize_with_gemini(title: str, content: str, retry_count: int = 0) -> str:
     """
     AI-суммаризация статьи через Gemini Flash (бесплатный).
     Возвращает структурированный пост на русском языке.
+    При ошибке 429 (rate limit) — retry с задержкой или fallback перевод.
     """
     if not GEMINI_API_KEY:
         logger.warning("GEMINI_API_KEY не настроен, пропускаем суммаризацию")
@@ -106,7 +157,7 @@ def summarize_with_gemini(title: str, content: str) -> str:
 5. Пиши живым языком, без канцелярита
 6. НЕ добавляй хэштеги и ссылку — они будут добавлены отдельно
 
-Важно: пиши как человек, а не как робот. Читатель должен понять суть новости и почему она важна."""
+Важно: пиши как человек, а не как робот. Читатель должен понять суть новости и почему это важно."""
 
         data = {
             "contents": [{
@@ -121,6 +172,18 @@ def summarize_with_gemini(title: str, content: str) -> str:
         }
         
         response = requests.post(url, json=data, timeout=30)
+        
+        # Обработка 429 (rate limit)
+        if response.status_code == 429:
+            if retry_count < 2:
+                wait_time = (retry_count + 1) * 10  # 10s, 20s
+                logger.warning(f"⚠ Gemini rate limit. Retry {retry_count + 1} через {wait_time}s...")
+                time.sleep(wait_time)
+                return summarize_with_gemini(title, content, retry_count + 1)
+            else:
+                logger.warning("⚠ Gemini rate limit (3 попытки). Используем fallback перевод...")
+                return translate_fallback(title)
+        
         response.raise_for_status()
         
         result = response.json()
@@ -135,7 +198,7 @@ def summarize_with_gemini(title: str, content: str) -> str:
         
     except Exception as e:
         logger.error(f"⚠ Ошибка Gemini: {e}")
-        return ""
+        return translate_fallback(title)
 
 
 def format_telegram_post(news: Dict, ai_summary: str = "") -> str:
@@ -503,15 +566,6 @@ def filter_tech_news(news_items: List[Dict]) -> List[Dict]:
     return filtered
 
 
-def escape_markdown(text: str) -> str:
-    """Экранирование спецсимволов Markdown для Telegram"""
-    # Символы которые нужно экранировать в Markdown v1
-    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for char in escape_chars:
-        text = text.replace(char, f'\\{char}')
-    return text
-
-
 async def send_to_telegram(post: str):
     """Отправка поста в Telegram"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
@@ -652,10 +706,11 @@ async def post_from_queue():
 
 async def main():
     """Основная функция"""
-    logger.info("🤖 Запуск Tech News Parser v2.0 (AI-powered)...")
+    logger.info("🤖 Запуск Tech News Parser v2.4 (AI-powered + fallback)...")
     logger.info(f"📅 Режим: 1 пост каждые {POST_INTERVAL} минут")
     if GEMINI_API_KEY:
         logger.info("🧠 AI-суммаризация: ВКЛЮЧЕНА")
+        logger.info("🔄 Fallback перевод: ВКЛЮЧЁН (при rate limit)")
     else:
         logger.info("⚠️ AI-суммаризация: ОТКЛЮЧЕНА (добавь GEMINI_API_KEY)")
 

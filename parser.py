@@ -1,7 +1,8 @@
 """
-Tech News Parser v2.0
+Tech News Parser v2.3
 Парсер новостей о технологиях: ИИ, мобильные устройства, гаджеты, техно-мероприятия
 Скрыпинг статей + AI-суммаризация через Gemini
+v2.3: Авто-очистка старых новостей (48ч) для предотвращения дубликатов
 """
 
 import logging
@@ -316,18 +317,44 @@ CATEGORY_KEYWORDS = {
 }
 
 
-def load_seen_news() -> set:
-    """Загрузить уже виденные новости"""
+def load_seen_news() -> dict:
+    """
+    Загрузить уже виденные новости с временными метками.
+    Возвращает dict: {news_id: timestamp}
+    """
     if SEEN_FILE.exists():
-        with open(SEEN_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
-    return set()
+        try:
+            with open(SEEN_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # Поддержка старого формата (просто список)
+                if isinstance(data, list):
+                    return {item: datetime.now().isoformat() for item in data}
+                return data
+        except Exception as e:
+            logger.warning(f"⚠ Ошибка загрузки seen_news.json: {e}")
+            return {}
+    return {}
 
 
-def save_seen_news(seen: set):
-    """Сохранить виденные новости"""
+def save_seen_news(seen: dict):
+    """
+    Сохранить виденные новости с временными метками.
+    Автоматически удаляет записи старше 48 часов.
+    """
+    # Очищаем старые записи (> 48 часов)
+    cutoff = datetime.now() - timedelta(hours=48)
+    cleaned = {
+        news_id: ts 
+        for news_id, ts in seen.items() 
+        if datetime.fromisoformat(ts) > cutoff
+    }
+    
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(seen), f, indent=2)
+        json.dump(cleaned, f, indent=2)
+    
+    removed = len(seen) - len(cleaned)
+    if removed > 0:
+        logger.info(f"🧹 Удалено {removed} старых записей из seen_news.json")
 
 
 def load_queue() -> List[Dict]:
@@ -536,7 +563,7 @@ async def parse_and_send(sources: List[str] = None):
     if sources is None:
         sources = list(SOURCES.keys())
 
-    seen_news = load_seen_news()
+    seen_news = load_seen_news()  # Теперь dict: {news_id: timestamp}
     queue = load_queue()
 
     all_news = []
@@ -554,11 +581,11 @@ async def parse_and_send(sources: List[str] = None):
         if news_id not in seen_news:
             news["category"] = detect_category(news["title"], news["summary"])
             new_news.append(news)
-            seen_news.add(news_id)
+            seen_news[news_id] = datetime.now().isoformat()  # Сохраняем с timestamp
 
     logger.info(f"Новых новостей: {len(new_news)}")
 
-    save_seen_news(seen_news)
+    save_seen_news(seen_news)  # Авто-очистка старых записей
 
     if new_news:
         queue.extend(new_news)

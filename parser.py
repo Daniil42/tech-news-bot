@@ -1,8 +1,8 @@
 """
-Tech News Parser v2.4
+Tech News Parser v2.5
 Парсер новостей о технологиях: ИИ, мобильные устройства, гаджеты, техно-мероприятия
 Скрыпинг статей + AI-суммаризация через Gemini
-v2.4: Fallback перевод при rate limit + retry логика
+v2.5: MyMemory Translation API для fallback (бесплатный перевод без лимитов Gemini)
 """
 
 import logging
@@ -74,53 +74,99 @@ def fetch_article_content(url: str) -> str:
         return ""
 
 
-def translate_fallback(title: str) -> str:
+def translate_with_mymemory(text: str) -> str:
     """
-    Fallback: простой перевод заголовка на русский через Gemini.
-    Используется когда основная суммаризация недоступна.
+    Перевод через MyMemory Translation API (бесплатно, без ключа).
+    Лимит: 5000 слов/день.
     """
-    if not GEMINI_API_KEY or not title:
+    if not text:
         return ""
     
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        # MyMemory API: https://mymemory.translated.net/doc/
+        url = f"https://api.mymemory.translated.net/get?q={requests.utils.quote(text)}&langpair=en|ru"
         
-        prompt = f"""Переведи этот заголовок техно-новости на русский язык. 
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        if result.get("responseStatus") == 200:
+            translation = result["responseData"]["translatedText"]
+            logger.info(f"✓ MyMemory перевод: {translation[:50]}...")
+            return translation
+        
+        logger.warning(f"⚠ MyMemory ошибка: {result.get('responseDetails', 'Unknown')}")
+        return ""
+        
+    except Exception as e:
+        logger.error(f"⚠ Ошибка MyMemory перевода: {e}")
+        return ""
+
+
+def translate_fallback(title: str, summary: str = "") -> str:
+    """
+    Fallback: перевод через MyMemory API когда Gemini недоступен.
+    Переводит заголовок + summary если есть.
+    """
+    if not title:
+        return ""
+    
+    # Пробуем MyMemory (бесплатный, без лимитов как у Gemini)
+    translated_title = translate_with_mymemory(title)
+    
+    if translated_title:
+        result = f"📰 {translated_title}"
+        
+        if summary:
+            translated_summary = translate_with_mymemory(summary[:500])  # лимит 500 символов
+            if translated_summary:
+                result += f"\n\n{translated_summary}"
+        
+        result += "\n\n_Перевод автоматически. Оригинал по ссылке ниже._"
+        logger.info(f"✓ Fallback перевод выполнен через MyMemory")
+        return result
+    
+    # Если MyMemory не сработал, пробуем Gemini
+    if GEMINI_API_KEY:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+            
+            prompt = f"""Переведи этот заголовок техно-новости на русский язык. 
 Только перевод, без комментариев.
 
 Заголовок: {title}
 
 Перевод:"""
 
-        data = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }],
-            "generationConfig": {
-                "temperature": 0.3,
-                "maxOutputTokens": 200
+            data = {
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }],
+                "generationConfig": {
+                    "temperature": 0.3,
+                    "maxOutputTokens": 200
+                }
             }
-        }
-        
-        response = requests.post(url, json=data, timeout=15)
-        
-        if response.status_code == 429:
-            logger.warning("⚠ Gemini rate limit в fallback переводе")
-            return ""
-        
-        response.raise_for_status()
-        result = response.json()
-        
-        if "candidates" in result and len(result["candidates"]) > 0:
-            translation = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-            logger.info(f"✓ Fallback перевод выполнен: {translation[:50]}...")
-            return f"📰 {translation}\n\n_Оригинальная статья на английском. Полная версия по ссылке ниже._"
-        
-        return ""
-        
-    except Exception as e:
-        logger.error(f"⚠ Ошибка fallback перевода: {e}")
-        return ""
+            
+            response = requests.post(url, json=data, timeout=15)
+            
+            if response.status_code == 429:
+                logger.warning("⚠ Gemini rate limit в fallback переводе")
+                return f"📰 {title}\n\n_English article — translation unavailable_"
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            if "candidates" in result and len(result["candidates"]) > 0:
+                translation = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                logger.info(f"✓ Gemini fallback перевод: {translation[:50]}...")
+                return f"📰 {translation}\n\n_Оригинальная статья на английском_"
+            
+        except Exception as e:
+            logger.error(f"⚠ Ошибка Gemini fallback: {e}")
+    
+    return f"📰 {title}\n\n_English article_"
 
 
 def summarize_with_gemini(title: str, content: str, retry_count: int = 0) -> str:
@@ -182,7 +228,7 @@ def summarize_with_gemini(title: str, content: str, retry_count: int = 0) -> str
                 return summarize_with_gemini(title, content, retry_count + 1)
             else:
                 logger.warning("⚠ Gemini rate limit (3 попытки). Используем fallback перевод...")
-                return translate_fallback(title)
+                return translate_fallback(title, content[:500])
         
         response.raise_for_status()
         
@@ -198,7 +244,7 @@ def summarize_with_gemini(title: str, content: str, retry_count: int = 0) -> str
         
     except Exception as e:
         logger.error(f"⚠ Ошибка Gemini: {e}")
-        return translate_fallback(title)
+        return translate_fallback(title, content[:500] if content else "")
 
 
 def format_telegram_post(news: Dict, ai_summary: str = "") -> str:
